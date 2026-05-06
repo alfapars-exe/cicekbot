@@ -4,26 +4,27 @@ namespace Metin2Bot.Application.Interfaces
 {
     public interface IInputService
     {
-        /// <summary>
-        /// Belirtilen pencere başlığına sahip pencerenin handle (IntPtr) değerini bulur.
-        /// </summary>
-        /// <param name="windowTitle">Pencere başlığı.</param>
-        /// <returns>Pencere handle değeri.</returns>
         IntPtr FindWindow(string windowTitle);
 
         /// <summary>
-        /// Belirtilen koordinatlara arka planda sol tıklama yapar.
+        /// Cursor teleport + mouse_event tabanlı tıklama (orijinal repo davranışı).
         /// </summary>
-        /// <param name="handle">Pencere handle değeri.</param>
-        /// <param name="x">X koordinatı.</param>
-        /// <param name="y">Y koordinatı.</param>
         void BackgroundClick(IntPtr handle, int x, int y);
 
         /// <summary>
-        /// Belirtilen tuşu arka planda gönderir.
+        /// Foreground gerçek mouse tıklaması (mouse_event). Pencerenin önde olduğu varsayılır.
         /// </summary>
-        /// <param name="handle">Pencere handle değeri.</param>
-        /// <param name="keyCode">Tuş kodu (Virtual Key Code).</param>
+        void ForegroundClick(int screenX, int screenY);
+
+        /// <summary>
+        /// İnsan benzeri tıklama: smooth cursor hareketi + SendInput ile gerçek mouse input
+        /// + parametrik click hold süresi + jitter. Pencerenin foreground olduğu varsayılır.
+        /// </summary>
+        /// <param name="screenX">Hedef X (ekran koordinatı)</param>
+        /// <param name="screenY">Hedef Y (ekran koordinatı)</param>
+        /// <param name="clickDurationMs">Click basılı tutma süresi (ms). 300-500 önerilir.</param>
+        void HumanClick(int screenX, int screenY, int clickDurationMs);
+
         void BackgroundKeyPress(IntPtr handle, int keyCode);
     }
 }

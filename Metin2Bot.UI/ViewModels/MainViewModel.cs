@@ -2,191 +2,312 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Metin2Bot.Application.Interfaces;
 using Metin2Bot.Domain.Models;
-using System;
 using System.Collections.ObjectModel;
-using System.IO;
-using System.Linq;
-using System.Threading;
-using System.Threading.Channels;
-using System.Threading.Tasks;
 using System.Windows;
 
 namespace Metin2Bot.UI.ViewModels
 {
-    // Kuyrukta (Channel) taşınacak verilerin modelleri (Record)
-    public record ScanCommand(WindowInfo Window);
-    public record ClickCommand(WindowInfo Window, int X, int Y, string FileName);
-
     public partial class MainViewModel : ObservableObject
     {
+        private readonly IConfigStore _configStore;
+        private readonly IWindowService _windowService;
         private readonly IVisionService _visionService;
         private readonly IInputService _inputService;
-        private readonly IWindowService _windowService;
-        private CancellationTokenSource? _cts;
-
-        // --- KUYRUKLAR (CHANNELS) ---
-        // Sadece 1 adet tarama ve 1 adet tıklama kuyruğu oluşturuyoruz. Kapasitelerini 10 ile sınırlıyoruz ki RAM şişmesin.
-        private Channel<ScanCommand> _scanChannel;
-        private Channel<ClickCommand> _clickChannel;
+        private readonly ISnipService _snipService;
+        private readonly IBotEngine _botEngine;
+        private readonly BotConfiguration _config;
 
         [ObservableProperty]
-        private ObservableCollection<WindowInfo> _windows = new();
+        private ObservableCollection<ClientViewModel> _clients = new();
+
+        [ObservableProperty]
+        [NotifyCanExecuteChangedFor(nameof(AddProductCommand))]
+        [NotifyCanExecuteChangedFor(nameof(RemoveClientCommand))]
+        private ClientViewModel? _selectedClient;
 
         [ObservableProperty]
         private ObservableCollection<string> _logs = new();
 
         [ObservableProperty]
-        [NotifyCanExecuteChangedFor(nameof(StartBotCommand))]
-        [NotifyCanExecuteChangedFor(nameof(StopBotCommand))]
-        private bool _isRunning;
+        private int _clientSwitchDelayMs;
 
-        public MainViewModel(IVisionService visionService, IInputService inputService, IWindowService windowService)
+        [ObservableProperty]
+        private double _matchThreshold;
+
+        [ObservableProperty]
+        private bool _bringWindowToFront;
+
+        [ObservableProperty]
+        private bool _isBotRunning;
+
+        [ObservableProperty]
+        private string _botStatus = "Beklemede (DEL ile başlat)";
+
+        public MainViewModel(
+            IConfigStore configStore,
+            IWindowService windowService,
+            IVisionService visionService,
+            IInputService inputService,
+            ISnipService snipService,
+            IBotEngine botEngine)
         {
+            _configStore = configStore;
+            _windowService = windowService;
             _visionService = visionService;
             _inputService = inputService;
-            _windowService = windowService;
-            RefreshWindows();
+            _snipService = snipService;
+            _botEngine = botEngine;
+
+            _config = _configStore.Load();
+            _clientSwitchDelayMs = _config.Settings.ClientSwitchDelayMs;
+            _matchThreshold = _config.Settings.MatchThreshold;
+            _bringWindowToFront = _config.Settings.BringWindowToFront;
+
+            foreach (var clientModel in _config.Clients)
+            {
+                Clients.Add(new ClientViewModel(clientModel));
+            }
+
+            _botEngine.RunningStateChanged += OnBotStateChanged;
+            _botEngine.LogEmitted += (_, msg) => AddLog(msg);
+
+            AddLog($"Konfigürasyon yüklendi. {Clients.Count} client kayıtlı.");
+        }
+
+        private void OnBotStateChanged(object? sender, bool running)
+        {
+            System.Windows.Application.Current?.Dispatcher.InvokeAsync(() =>
+            {
+                IsBotRunning = running;
+                BotStatus = running ? "Çalışıyor (DEL ile durdur)" : "Beklemede (DEL ile başlat)";
+            });
+        }
+
+        partial void OnClientSwitchDelayMsChanged(int value)
+        {
+            _config.Settings.ClientSwitchDelayMs = value;
+            PersistConfig();
+        }
+
+        partial void OnMatchThresholdChanged(double value)
+        {
+            _config.Settings.MatchThreshold = value;
+            PersistConfig();
+        }
+
+        partial void OnBringWindowToFrontChanged(bool value)
+        {
+            _config.Settings.BringWindowToFront = value;
+            PersistConfig();
         }
 
         [RelayCommand]
-        private void RefreshWindows()
+        private void AddClient()
         {
-            Windows.Clear();
-            foreach (var win in _windowService.GetActiveWindows())
+            // Halihazırda eklenmiş client'ların kullandığı HWND'leri exclude et
+            var excludeHandles = _config.Clients
+                .Select(c => c.RuntimeHandle)
+                .Where(h => h != IntPtr.Zero && _windowService.IsValidWindow(h))
+                .ToList();
+
+            var pickerVm = new WindowPickerViewModel(_windowService, excludeHandles);
+            var dialog = new Views.WindowPickerDialog
             {
-                Windows.Add(win);
+                DataContext = pickerVm,
+                Owner = System.Windows.Application.Current.MainWindow
+            };
+
+            if (dialog.ShowDialog() == true && pickerVm.SelectedWindow is not null)
+            {
+                var clientModel = new ClientConfig
+                {
+                    DisplayName = string.IsNullOrWhiteSpace(pickerVm.DisplayName)
+                        ? pickerVm.SelectedWindow.Title
+                        : pickerVm.DisplayName,
+                    WindowTitle = pickerVm.SelectedWindow.Title,
+                    RuntimeHandle = pickerVm.SelectedWindow.Handle
+                };
+                _config.Clients.Add(clientModel);
+
+                var clientVm = new ClientViewModel(clientModel);
+                Clients.Add(clientVm);
+                SelectedClient = clientVm;
+                PersistConfig();
+                AddLog($"Client eklendi: {clientModel.DisplayName} (HWND={clientModel.RuntimeHandle.ToInt64():X})");
             }
-            AddLog($"{Windows.Count} adet Metin2 penceresi bulundu ve listeye eklendi.");
         }
 
-        [RelayCommand(CanExecute = nameof(CanStart))]
-        private async Task StartBotAsync()
+        [RelayCommand(CanExecute = nameof(HasSelectedClient))]
+        private void RemoveClient()
         {
-            if (Windows.Count == 0)
-            {
-                AddLog("Açık oyun penceresi yok!");
-                return;
-            }
-
-            IsRunning = true;
-            _cts = new CancellationTokenSource();
-            
-            // Kuyrukları başlat
-            _scanChannel = Channel.CreateBounded<ScanCommand>(10);
-            _clickChannel = Channel.CreateBounded<ClickCommand>(10);
-
-            AddLog($"Çoklu Bot Başlatıldı. Toplam {Windows.Count} pencere taranacak.");
+            var target = SelectedClient;
+            if (target is null) return;
 
             try
             {
-                // Fabrika Bant Sistemini (Görevleri) Paralel Olarak Başlatıyoruz
-                var producerTask = Task.Run(() => ProducerLoop(_cts.Token), _cts.Token);
-                var visionTask = Task.Run(() => VisionConsumerLoop(_cts.Token), _cts.Token);
-                var clickTask = Task.Run(() => ClickConsumerLoop(_cts.Token), _cts.Token);
+                var result = MessageBox.Show(
+                    $"'{target.DisplayName}' client'ı ve tüm ürünleri silinecek. Emin misiniz?",
+                    "Client Sil",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
 
-                // Üç görevden biri iptal edilene kadar bekle
-                await Task.WhenAll(producerTask, visionTask, clickTask);
-            }
-            catch (OperationCanceledException)
-            {
-                AddLog("Bot döngüsü güvenli bir şekilde sonlandırıldı.");
+                if (result != MessageBoxResult.Yes) return;
+
+                // 1. Önce UI binding'lerini gevşet — SelectedClient null olunca
+                //    sağ paneldeki SelectedClient.Products binding'i de düşer, böylece
+                //    item silerken visual tree problemleri olmaz
+                SelectedClient = null;
+
+                // 2. Ürün PNG'lerini sil
+                var imagesToDelete = target.Products.Select(p => p.ImagePath).ToList();
+                foreach (var path in imagesToDelete)
+                {
+                    _configStore.DeleteTemplate(path);
+                }
+
+                // 3. Koleksiyonlardan çıkar
+                _config.Clients.Remove(target.Model);
+                Clients.Remove(target);
+
+                AddLog($"Client silindi: {target.DisplayName}");
+                PersistConfig();
             }
             catch (Exception ex)
             {
-                AddLog($"Kritik Hata: {ex.Message}");
+                AddLog($"Client silinirken hata: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        [RelayCommand(CanExecute = nameof(CanAddProduct))]
+        private async Task AddProductAsync()
+        {
+            if (SelectedClient is null) return;
+
+            var handle = ResolveClientHandle(SelectedClient.Model);
+            if (handle == IntPtr.Zero)
+            {
+                AddLog($"Hata: '{SelectedClient.WindowTitle}' penceresi bulunamadı. Pencere açık ve görünür olmalı.");
+                return;
+            }
+            if (_windowService.IsMinimized(handle))
+            {
+                AddLog("Hata: Hedef pencere minimize. Önce büyültün.");
+                return;
+            }
+
+            // Ana pencereyi geçici olarak minimize et ki overlay'in altına gizlenmesin
+            var mainWindow = System.Windows.Application.Current?.MainWindow;
+            var prevState = mainWindow?.WindowState ?? WindowState.Normal;
+            if (mainWindow is not null) mainWindow.WindowState = WindowState.Minimized;
+            // Pencere render'ının yerleşmesi için kısa bir nefes
+            await Task.Delay(200);
+
+            ProductTemplate? template = null;
+            try
+            {
+                string suggested = $"urun_{SelectedClient.Products.Count + 1}";
+                template = _snipService.SnipFromWindow(handle, SelectedClient.Id, suggested);
+            }
+            catch (Exception ex)
+            {
+                AddLog($"Snip hatası: {ex.Message}");
             }
             finally
             {
-                IsRunning = false;
-                _cts?.Dispose();
-                _cts = null;
+                if (mainWindow is not null) mainWindow.WindowState = prevState;
             }
-        }
 
-        private bool CanStart() => !IsRunning;
-
-        [RelayCommand(CanExecute = nameof(IsRunning))]
-        private void StopBot()
-        {
-            AddLog("Durdurma isteği gönderildi...");
-            _cts?.Cancel();
-        }
-
-        // 1. ÜRETİCİ (PRODUCER): Sürekli açık pencereleri dolaşıp "Bunu Tara" emrini kuyruğa atar
-        private async Task ProducerLoop(CancellationToken token)
-        {
-            while (!token.IsCancellationRequested)
+            if (template is null)
             {
-                foreach (var win in Windows)
-                {
-                    if (token.IsCancellationRequested) break;
-                    
-                    // Tarama kuyruğuna pencereyi at
-                    await _scanChannel.Writer.WriteAsync(new ScanCommand(win), token);
-                }
-                
-                // CPU'yu yormamak için tüm pencereleri turladıktan sonra 1 saniye dinlen
-                await Task.Delay(1000, token);
+                AddLog("Snip iptal edildi.");
+                return;
             }
+
+            SelectedClient.AddProduct(template);
+            PersistConfig();
+            AddLog($"Ürün eklendi: {template.Name} ({template.SourceRegion.Width}x{template.SourceRegion.Height}px)");
         }
 
-        // 2. TÜKETİCİ (BEYİN): Tarama kuyruğundan pencereyi alır, çiçekleri arar.
-        private async Task VisionConsumerLoop(CancellationToken token)
+        [RelayCommand]
+        private void RemoveProduct(ProductViewModel? product)
         {
-            // Şablonları (fotoğrafları) döngü dışında bir kez yükleyerek performansı artırıyoruz
-            string[] templates = Directory.GetFiles(AppDomain.CurrentDomain.BaseDirectory, "*.png")
-                                          .Where(f => !f.EndsWith("last_capture.png"))
-                                          .ToArray();
+            if (product is null || SelectedClient is null) return;
 
-            await foreach (var command in _scanChannel.Reader.ReadAllAsync(token))
-            {
-                var winRect = _windowService.GetWindowRect(command.Window.Handle);
-                if (winRect.Width <= 0 || winRect.Height <= 0) continue;
-
-                var region = new Domain.Models.Region(winRect.X, winRect.Y, winRect.Width, winRect.Height);
-
-                foreach (var templatePath in templates)
-                {
-                    if (token.IsCancellationRequested) break;
-
-                    string fileName = Path.GetFileName(templatePath);
-                    double threshold = 0.55; // Gerekirse bunu 0.45 yapabilirsin
-                    
-                    var result = _visionService.FindTemplate(templatePath, region, threshold);
-
-                    if (result.HasValue && result.Value.Confidence >= threshold)
-                    {
-                        // Ekranda çiçek bulundu! Tıklama görevini (koordinatları) Tıklama Kuyruğuna at ve diğer şablonlara bakmayı bırak.
-                        await _clickChannel.Writer.WriteAsync(new ClickCommand(command.Window, result.Value.Location.X, result.Value.Location.Y, fileName), token);
-                        break; 
-                    }
-                }
-            }
+            _configStore.DeleteTemplate(product.ImagePath);
+            SelectedClient.RemoveProduct(product);
+            AddLog($"Ürün silindi: {product.Name}");
+            PersistConfig();
         }
 
-        // 3. TÜKETİCİ (EL): Tıklama kuyruğundan emirleri alır ve sırayla güvenli şekilde tıklar
-        private async Task ClickConsumerLoop(CancellationToken token)
+        [RelayCommand]
+        private void ToggleBot()
         {
-            await foreach (var command in _clickChannel.Reader.ReadAllAsync(token))
+            if (_botEngine.IsRunning)
             {
-                AddLog($"[EŞLEŞME - {command.Window.Title}] {command.FileName} bulundu! Tıklanıyor...");
-
-                // Kilit (lock) mimarisiyle yazdığımız Ghost Mouse metodu çalışıyor
-                _inputService.BackgroundClick(command.Window.Handle, command.X, command.Y);
-
-                // Karaktere koşması ve çiçeği toplaması için diğer tıklamaları 2 saniye beklet
-                await Task.Delay(2000, token);
+                _botEngine.Stop();
+            }
+            else
+            {
+                _botEngine.Start(_config);
             }
         }
 
-        // UI thread güvenliğini burada tek merkezden sağlıyoruz
-        private void AddLog(string message)
+        private bool HasSelectedClient() => SelectedClient is not null;
+
+        private bool CanAddProduct()
+        {
+            if (SelectedClient is null) return false;
+            var handle = ResolveClientHandle(SelectedClient.Model);
+            return handle != IntPtr.Zero && !_windowService.IsMinimized(handle);
+        }
+
+        /// <summary>
+        /// Client'ın RuntimeHandle'ı geçerliyse onu kullanır; değilse aynı title'a sahip,
+        /// başka client'larca kullanılmamış bir pencere bulup atar. Bulamazsa Zero döner.
+        /// </summary>
+        private IntPtr ResolveClientHandle(ClientConfig client)
+        {
+            if (client.RuntimeHandle != IntPtr.Zero
+                && _windowService.IsValidWindow(client.RuntimeHandle))
+            {
+                return client.RuntimeHandle;
+            }
+
+            var usedByOthers = _config.Clients
+                .Where(c => c.Id != client.Id && c.RuntimeHandle != IntPtr.Zero)
+                .Select(c => c.RuntimeHandle)
+                .ToHashSet();
+
+            var candidate = _windowService.FindAllByTitle(client.WindowTitle)
+                .Select(w => w.Handle)
+                .FirstOrDefault(h => !usedByOthers.Contains(h));
+
+            if (candidate != IntPtr.Zero)
+            {
+                client.RuntimeHandle = candidate;
+            }
+            return candidate;
+        }
+
+        public void AddLog(string message)
         {
             System.Windows.Application.Current?.Dispatcher.InvokeAsync(() =>
             {
                 Logs.Insert(0, $"[{DateTime.Now:HH:mm:ss}] {message}");
-                if (Logs.Count > 100) Logs.RemoveAt(100);
+                if (Logs.Count > 200) Logs.RemoveAt(200);
             });
+        }
+
+        private void PersistConfig()
+        {
+            try
+            {
+                _configStore.Save(_config);
+            }
+            catch (Exception ex)
+            {
+                AddLog($"Konfigürasyon kaydedilemedi: {ex.Message}");
+            }
         }
     }
 }

@@ -49,41 +49,32 @@ namespace Metin2Bot.Infrastructure.Services
 
             try
             {
-                using (Bitmap screenBmp = CaptureRegion(searchRegion))
+                using Bitmap screenBmp = CaptureRegion(searchRegion);
+                using Mat sourceMat = BitmapToMat(screenBmp);
+                using Image<Bgr, byte> templateImage = new Image<Bgr, byte>(templatePath);
+                using Mat sourceGray = new Mat();
+                using Mat templateGray = new Mat();
+                using Mat result = new Mat();
+
+                CvInvoke.CvtColor(sourceMat, sourceGray, ColorConversion.Bgr2Gray);
+                CvInvoke.CvtColor(templateImage, templateGray, ColorConversion.Bgr2Gray);
+                CvInvoke.MatchTemplate(sourceGray, templateGray, result, TemplateMatchingType.CcoeffNormed);
+
+                double minVal = 0, maxVal = 0;
+                Point minLoc = new Point(), maxLoc = new Point();
+                CvInvoke.MinMaxLoc(result, ref minVal, ref maxVal, ref minLoc, ref maxLoc);
+
+                return new MatchResult
                 {
-                    try { screenBmp.Save("last_capture.png", ImageFormat.Png); } catch { }
-
-                    using (Mat sourceMat = BitmapToMat(screenBmp))
-                    using (Image<Bgr, byte> templateImage = new Image<Bgr, byte>(templatePath))
-                    {
-                        using (Mat sourceGray = new Mat())
-                        using (Mat templateGray = new Mat())
-                        {
-                            CvInvoke.CvtColor(sourceMat, sourceGray, ColorConversion.Bgr2Gray);
-                            CvInvoke.CvtColor(templateImage, templateGray, ColorConversion.Bgr2Gray);
-
-                            using (Mat result = new Mat())
-                            {
-                                CvInvoke.MatchTemplate(sourceGray, templateGray, result, TemplateMatchingType.CcoeffNormed);
-
-                                double minVal = 0, maxVal = 0;
-                                Point minLoc = new Point(), maxLoc = new Point();
-                                CvInvoke.MinMaxLoc(result, ref minVal, ref maxVal, ref minLoc, ref maxLoc);
-
-                                return new MatchResult 
-                                { 
-                                    Location = new Location(searchRegion.X + maxLoc.X + (templateImage.Width / 2), 
-                                                         searchRegion.Y + maxLoc.Y + (templateImage.Height / 2)),
-                                    Confidence = maxVal
-                                };
-                            }
-                        }
-                    }
-                }
+                    Location = new Location(
+                        searchRegion.X + maxLoc.X + (templateImage.Width / 2),
+                        searchRegion.Y + maxLoc.Y + (templateImage.Height / 2)),
+                    Confidence = maxVal
+                };
             }
             catch (Exception ex)
             {
-                // Hata durumunda loglanabilir veya sessizce geçilebilir
+                System.Diagnostics.Debug.WriteLine($"[VisionService] FindTemplate failed for '{templatePath}': {ex.Message}");
                 return null;
             }
         }
