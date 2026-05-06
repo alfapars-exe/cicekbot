@@ -133,22 +133,13 @@
                     <TextBox Text="{Binding MatchThreshold, UpdateSourceTrigger=PropertyChanged, StringFormat=F2}"/>
                 </StackPanel>
                 <StackPanel Grid.Column="2" Margin="6,0,0,0" VerticalAlignment="Bottom">
-                    <TextBlock Text="Pencere Yönetimi" Foreground="#9AA0B4" FontSize="11" Margin="0,0,0,4"/>
-                    <CheckBox IsChecked="{Binding BringWindowToFront}"
-                              Foreground="#E0E0E0" FontSize="12"
-                              VerticalContentAlignment="Center" Padding="6,0,0,0">
-                        <CheckBox.ToolTip>
-                            <StackPanel MaxWidth="320">
-                                <TextBlock Text="Pencereyi öne getir" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                                <TextBlock TextWrapping="Wrap" Foreground="#CF6679">
-                                    UYARI: Bu açıkken bazı oyunlar DirectInput moduna geçip tıklamaları bloklayabilir.
-                                    Tıklamalar oyunda görünmüyorsa kapatın.
-                                </TextBlock>
-                            </StackPanel>
-                        </CheckBox.ToolTip>
+                    <TextBlock Text="Tıklama Modu" Foreground="#9AA0B4" FontSize="11" Margin="0,0,0,4"/>
+                    <TextBlock Text="Aktif pencere" Foreground="#E0E0E0" FontSize="12"/>
+                    <!--
                         <TextBlock Text="🪟 Her turda pencereyi öne getir" FontSize="12"/>
                     </CheckBox>
-                    <TextBlock Text="DEL: bot başlat/durdur (global)" Foreground="#7F8294" FontSize="10" Margin="22,4,0,0"/>
+                    -->
+                    <TextBlock Text="DEL: bot başlat/durdur (global)" Foreground="#7F8294" FontSize="10" Margin="0,4,0,0"/>
                 </StackPanel>
             </Grid>
         </Border>

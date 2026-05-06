@@ -35,9 +35,6 @@ namespace Metin2Bot.UI.ViewModels
         private double _matchThreshold;
 
         [ObservableProperty]
-        private bool _bringWindowToFront;
-
-        [ObservableProperty]
         private bool _isBotRunning;
 
         [ObservableProperty]
@@ -61,7 +58,6 @@ namespace Metin2Bot.UI.ViewModels
             _config = _configStore.Load();
             _clientSwitchDelayMs = _config.Settings.ClientSwitchDelayMs;
             _matchThreshold = _config.Settings.MatchThreshold;
-            _bringWindowToFront = _config.Settings.BringWindowToFront;
 
             foreach (var clientModel in _config.Clients)
             {
@@ -92,12 +88,6 @@ namespace Metin2Bot.UI.ViewModels
         partial void OnMatchThresholdChanged(double value)
         {
             _config.Settings.MatchThreshold = value;
-            PersistConfig();
-        }
-
-        partial void OnBringWindowToFrontChanged(bool value)
-        {
-            _config.Settings.BringWindowToFront = value;
             PersistConfig();
         }
 

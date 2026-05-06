@@ -1,85 +1,29 @@
-using System;
 using System.Drawing;
-using System.Runtime.InteropServices;
 using System.Threading;
 using Metin2Bot.Application.Interfaces;
+using Metin2Bot.Infrastructure.Services.Input;
 
 namespace Metin2Bot.Infrastructure.Services
 {
     public class InputService : IInputService
     {
-        [DllImport("user32.dll")]
-        private static extern bool PostMessage(IntPtr hWnd, uint Msg, int wParam, int lParam);
+        private readonly IMouseInputDriver _mouse;
 
-        [DllImport("user32.dll")]
-        private static extern bool GetCursorPos(out Point lpPoint);
+        private const int CursorSettleMs = 20;
+        private const int DefaultClickHoldMs = 60;
+        private const int ReleaseSettleMs = 15;
 
-        [DllImport("user32.dll")]
-        private static extern bool SetCursorPos(int x, int y);
+        private static readonly object _mouseLock = new();
 
-        [DllImport("user32.dll")]
-        private static extern bool ScreenToClient(IntPtr hWnd, ref Point lpPoint);
-
-        [DllImport("user32.dll")]
-        private static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct INPUT
+        public InputService()
+            : this(new NativeMouseInputDriver())
         {
-            public uint type;
-            public InputUnion u;
         }
 
-        [StructLayout(LayoutKind.Explicit)]
-        private struct InputUnion
+        internal InputService(IMouseInputDriver mouse)
         {
-            [FieldOffset(0)] public MOUSEINPUT mi;
-            [FieldOffset(0)] public KEYBDINPUT ki;
-            [FieldOffset(0)] public HARDWAREINPUT hi;
+            _mouse = mouse;
         }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct MOUSEINPUT
-        {
-            public int dx;
-            public int dy;
-            public uint mouseData;
-            public uint dwFlags;
-            public uint time;
-            public IntPtr dwExtraInfo;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct KEYBDINPUT
-        {
-            public ushort wVk;
-            public ushort wScan;
-            public uint dwFlags;
-            public uint time;
-            public IntPtr dwExtraInfo;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct HARDWAREINPUT
-        {
-            public uint uMsg;
-            public ushort wParamL;
-            public ushort wParamH;
-        }
-
-        private const uint INPUT_MOUSE = 0;
-        private const uint WM_LBUTTONDOWN = 0x0201;
-        private const uint WM_LBUTTONUP = 0x0202;
-        private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-        private const uint MOUSEEVENTF_LEFTUP = 0x0004;
-
-        private readonly Random _random = new Random();
-        
-        // Çoklu ekranda (multi-client) farklı oyunların fareyi aynı anda kapışmasını engellemek için kilit
-        private static readonly object _mouseLock = new object();
 
         public IntPtr FindWindow(string windowTitle) => IntPtr.Zero;
 
@@ -89,56 +33,22 @@ namespace Metin2Bot.Infrastructure.Services
 
             lock (_mouseLock)
             {
-                // Hedef offset ±8px (önce ±5) — daha geniş insan-benzeri sapma
-                int targetX = x + _random.Next(-8, 9);
-                int targetY = y + _random.Next(-8, 9);
+                int lParam = _mouse.MakeClientLParam(handle, x, y);
+                ReleaseBeforeClick(handle, lParam);
 
-                // Cursor'un mevcut pozisyonunu al, smooth move'un başlangıç noktası
-                GetCursorPos(out Point origin);
+                _mouse.SetCursorPosition(x, y);
+                Thread.Sleep(CursorSettleMs);
 
-                // Smooth ease-in-out hareket — anlık ışınlanma yerine doğal el hareketi.
-                // Mesafeye orantılı süre (uzak hedef = daha uzun yol).
-                int distance = (int)Math.Sqrt(Math.Pow(targetX - origin.X, 2) + Math.Pow(targetY - origin.Y, 2));
-                int moveDuration = Math.Clamp(distance / 4 + _random.Next(60, 180), 80, 500);
-                SmoothMove(origin.X, origin.Y, targetX, targetY, moveDuration);
-
-                // Reaksiyon delay (insan görüş→tıklama latency'si)
-                Thread.Sleep(_random.Next(60, 180));
-
-                // Cursor target'ta mı doğrula
-                GetCursorPos(out Point verify);
-                if (Math.Abs(verify.X - targetX) > 3 || Math.Abs(verify.Y - targetY) > 3)
+                try
                 {
-                    SetCursorPos(targetX, targetY);
-                    Thread.Sleep(_random.Next(20, 50));
+                    _mouse.SendLeftButtonDown();
+                    _mouse.PostLeftButtonDown(handle, lParam);
+                    Thread.Sleep(DefaultClickHoldMs);
                 }
-
-                // PostMessage backup için client koordinatları
-                Point clientPoint = new Point(targetX, targetY);
-                ScreenToClient(handle, ref clientPoint);
-                int lParam = (clientPoint.Y << 16) | (clientPoint.X & 0xFFFF);
-
-                var down = new INPUT { type = INPUT_MOUSE, u = new InputUnion { mi = new MOUSEINPUT { dwFlags = MOUSEEVENTF_LEFTDOWN } } };
-                var up = new INPUT { type = INPUT_MOUSE, u = new InputUnion { mi = new MOUSEINPUT { dwFlags = MOUSEEVENTF_LEFTUP } } };
-
-                // Hold süresi geniş aralık (200-550ms) — insan tıklama varyansını taklit
-                int holdMs = _random.Next(200, 551);
-                SendInput(1, new[] { down }, Marshal.SizeOf<INPUT>());
-                Thread.Sleep(holdMs);
-                SendInput(1, new[] { up }, Marshal.SizeOf<INPUT>());
-                PostMessage(handle, WM_LBUTTONUP, 0, lParam);
-
-                // Insurance LEFTUP'ları
-                int extraUps = _random.Next(2, 4);
-                for (int i = 0; i < extraUps; i++)
+                finally
                 {
-                    Thread.Sleep(_random.Next(25, 95));
-                    SendInput(1, new[] { up }, Marshal.SizeOf<INPUT>());
-                    PostMessage(handle, WM_LBUTTONUP, 0, lParam);
+                    ReleaseAfterClick(handle, lParam);
                 }
-
-                // Click sonrası cursor target'ta kalır, micro-pause
-                Thread.Sleep(_random.Next(50, 130));
             }
         }
 
@@ -146,20 +56,22 @@ namespace Metin2Bot.Infrastructure.Services
         {
             lock (_mouseLock)
             {
-                GetCursorPos(out Point originalPos);
+                Point originalPosition = _mouse.GetCursorPosition();
+                ReleaseBeforeClick(IntPtr.Zero, 0);
 
-                int targetX = screenX + _random.Next(-2, 3);
-                int targetY = screenY + _random.Next(-2, 3);
+                _mouse.SetCursorPosition(screenX, screenY);
+                Thread.Sleep(CursorSettleMs);
 
-                SetCursorPos(targetX, targetY);
-                Thread.Sleep(20);
-
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
-                Thread.Sleep(_random.Next(40, 80));
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
-
-                Thread.Sleep(20);
-                SetCursorPos(originalPos.X, originalPos.Y);
+                try
+                {
+                    _mouse.SendLeftButtonDown();
+                    Thread.Sleep(DefaultClickHoldMs);
+                }
+                finally
+                {
+                    ReleaseAfterClick(IntPtr.Zero, 0);
+                    _mouse.SetCursorPosition(originalPosition.X, originalPosition.Y);
+                }
             }
         }
 
@@ -167,75 +79,54 @@ namespace Metin2Bot.Infrastructure.Services
         {
             lock (_mouseLock)
             {
-                GetCursorPos(out Point origin);
+                Point originalPosition = _mouse.GetCursorPosition();
+                ReleaseBeforeClick(IntPtr.Zero, 0);
 
-                // Hedef etrafında küçük random sapma — aynı pikselde click bot fingerprint'idir
-                int targetX = screenX + _random.Next(-3, 4);
-                int targetY = screenY + _random.Next(-3, 4);
+                _mouse.SetCursorPosition(screenX, screenY);
+                Thread.Sleep(CursorSettleMs);
 
-                // 1. Cursor'u hedefe smooth taşı (~80-150ms, ease-in-out)
-                int moveDuration = _random.Next(80, 150);
-                SmoothMove(origin.X, origin.Y, targetX, targetY, moveDuration);
-
-                // 2. Tıklama öncesi reaksiyon delay'i (insan görüş→eylem latency'si)
-                Thread.Sleep(_random.Next(40, 120));
-
-                // 3. SendInput ile MOUSEDOWN — gerçek OS-level input
-                SendMouseFlag(MOUSEEVENTF_LEFTDOWN);
-
-                // 4. Click hold süresi (kullanıcı parametresi ± jitter)
-                int hold = Math.Max(50, clickDurationMs + _random.Next(-50, 51));
-                Thread.Sleep(hold);
-
-                // 5. SendInput ile MOUSEUP
-                SendMouseFlag(MOUSEEVENTF_LEFTUP);
-
-                // 6. Tıklama sonrası kısa pause
-                Thread.Sleep(_random.Next(30, 80));
-
-                // 7. Cursor'u eski pozisyonuna smooth dön (kullanıcının fare hareketini bozmaz)
-                SmoothMove(targetX, targetY, origin.X, origin.Y, _random.Next(60, 120));
+                try
+                {
+                    _mouse.SendLeftButtonDown();
+                    Thread.Sleep(Math.Max(50, clickDurationMs));
+                }
+                finally
+                {
+                    ReleaseAfterClick(IntPtr.Zero, 0);
+                    _mouse.SetCursorPosition(originalPosition.X, originalPosition.Y);
+                }
             }
         }
 
-        private static void SendMouseFlag(uint flag)
+        public void ReleaseMouseButtons(IntPtr handle = default)
         {
-            var input = new INPUT
+            lock (_mouseLock)
             {
-                type = INPUT_MOUSE,
-                u = new InputUnion { mi = new MOUSEINPUT { dwFlags = flag } }
-            };
-            SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>());
-        }
-
-        /// <summary>
-        /// Cursor'u (fromX,fromY)'den (toX,toY)'ye ease-in-out cubic ile yumuşak taşır.
-        /// Anlık SetCursorPos ışınlanması yerine doğal hareket — bot tespitini zorlaştırır.
-        /// </summary>
-        private static void SmoothMove(int fromX, int fromY, int toX, int toY, int durationMs)
-        {
-            int distance = Math.Max(1, (int)Math.Sqrt(Math.Pow(toX - fromX, 2) + Math.Pow(toY - fromY, 2)));
-            int steps = Math.Clamp(distance / 6, 8, 40);
-            int sleepPerStep = Math.Max(2, durationMs / steps);
-
-            for (int i = 1; i <= steps; i++)
-            {
-                double t = i / (double)steps;
-                // Ease-in-out cubic — hızlanıp yavaşlama, doğal el hareketine benzer
-                double eased = t < 0.5
-                    ? 4 * t * t * t
-                    : 1 - Math.Pow(-2 * t + 2, 3) / 2;
-
-                int x = (int)Math.Round(fromX + (toX - fromX) * eased);
-                int y = (int)Math.Round(fromY + (toY - fromY) * eased);
-                SetCursorPos(x, y);
-                if (i < steps) Thread.Sleep(sleepPerStep);
+                int lParam = 0;
+                if (handle != IntPtr.Zero)
+                {
+                    Point cursor = _mouse.GetCursorPosition();
+                    lParam = _mouse.MakeClientLParam(handle, cursor.X, cursor.Y);
+                }
+                _mouse.ForceLeftButtonUp(handle, lParam);
+                Thread.Sleep(ReleaseSettleMs);
             }
         }
 
         public void BackgroundKeyPress(IntPtr handle, int keyCode)
         {
-            // İleride eklenecek
+            // Reserved for future use.
+        }
+
+        private void ReleaseBeforeClick(IntPtr handle, int lParam)
+        {
+            _mouse.ForceLeftButtonUp(handle, lParam);
+        }
+
+        private void ReleaseAfterClick(IntPtr handle, int lParam)
+        {
+            _mouse.ForceLeftButtonUp(handle, lParam);
+            Thread.Sleep(ReleaseSettleMs);
         }
     }
 }
