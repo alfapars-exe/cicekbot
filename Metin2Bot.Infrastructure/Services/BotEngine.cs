@@ -6,13 +6,9 @@ namespace Metin2Bot.Infrastructure.Services
 {
     public class BotEngine : IBotEngine
     {
-        private readonly IInputService _inputService;
         private readonly ClientHandleResolver _handleResolver;
         private readonly ForegroundWindowCoordinator _foregroundCoordinator;
         private readonly ProductClickProcessor _productClickProcessor;
-
-        // Client switch öncesi pencerenin "buton basılı" state'ini bırakması için bekleme
-        private const int ReleaseSafetyDelayMs = 80;
 
         private CancellationTokenSource? _cts;
         private Task? _loopTask;
@@ -26,7 +22,6 @@ namespace Metin2Bot.Infrastructure.Services
             IVisionService visionService,
             IInputService inputService)
         {
-            _inputService = inputService;
             _handleResolver = new ClientHandleResolver(windowService);
             _foregroundCoordinator = new ForegroundWindowCoordinator(windowService);
             _productClickProcessor = new ProductClickProcessor(windowService, visionService, inputService);
@@ -94,13 +89,9 @@ namespace Metin2Bot.Infrastructure.Services
 
                         _productClickProcessor.Process(clientNo, client, handle, threshold, EmitLog);
 
-                        // Client switch öncesi safety release — önceki client'ın "mouse follow"
-                        // moduna girip cursor'u takip etmesini engellemek için ekstra LEFTUP.
-                        // Cursor sonraki client'a gitmeden önce, mevcut pencereye Up sinyali yollanır.
-                        _inputService.ReleaseMouseButtons(handle);
-
-                        try { await Task.Delay(ReleaseSafetyDelayMs, token); }
-                        catch (OperationCanceledException) { break; }
+                        // NOT: Click sonrası release zaten InputService.BackgroundClick içinde
+                        // (ReleaseAfterClick: 3-kanal LEFTUP + 15ms settle) yapılıyor. Burada
+                        // ekstra ReleaseMouseButtons çağrısı eklemek tıklama detection'ını boğuyordu.
 
                         try { await Task.Delay(delayMs, token); }
                         catch (OperationCanceledException) { break; }
