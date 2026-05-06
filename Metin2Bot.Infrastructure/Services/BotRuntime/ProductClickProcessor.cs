@@ -9,6 +9,7 @@ namespace Metin2Bot.Infrastructure.Services.BotRuntime
         private readonly IWindowService _windowService;
         private readonly IVisionService _visionService;
         private readonly IInputService _inputService;
+        private readonly SessionFatigueModel _fatigueModel;
         private readonly ProductRotationState _rotationState = new();
         private readonly ClickCooldownTracker _cooldownTracker = new();
         private readonly StuckCorrectionTracker _stuckTracker = new();
@@ -19,11 +20,13 @@ namespace Metin2Bot.Infrastructure.Services.BotRuntime
         public ProductClickProcessor(
             IWindowService windowService,
             IVisionService visionService,
-            IInputService inputService)
+            IInputService inputService,
+            SessionFatigueModel fatigueModel)
         {
             _windowService = windowService;
             _visionService = visionService;
             _inputService = inputService;
+            _fatigueModel = fatigueModel;
         }
 
         public void Reset()
@@ -31,6 +34,7 @@ namespace Metin2Bot.Infrastructure.Services.BotRuntime
             _rotationState.Clear();
             _cooldownTracker.Clear();
             _stuckTracker.Clear();
+            _fatigueModel.Reset();
         }
 
         public bool Process(
@@ -131,6 +135,7 @@ namespace Metin2Bot.Infrastructure.Services.BotRuntime
             else
             {
                 emitLog($"Client{clientNo} ({client.DisplayName}), {productNo}. ürün ({product.Name}) tıklandı -> ({location.X},{location.Y}) [eşleşme {result.Confidence:F2}]");
+                ApplyFatigue(clientNo, client.DisplayName, emitLog);
                 _inputService.BackgroundClick(handle, location.X, location.Y);
             }
 
@@ -151,9 +156,27 @@ namespace Metin2Bot.Infrastructure.Services.BotRuntime
             int correctionY = location.Y + CorrectionOffset;
 
             emitLog($"Client{clientNo} ({displayName}), {productNo}. ürün takıldı - düzeltme tıklaması ({correctionX},{correctionY}) -> tekrar ({location.X},{location.Y})");
+            ApplyFatigue(clientNo, displayName, emitLog);
             _inputService.BackgroundClick(handle, correctionX, correctionY);
             Thread.Sleep(CorrectionRetryDelayMs);
             _inputService.BackgroundClick(handle, location.X, location.Y);
+        }
+
+        private void ApplyFatigue(int clientNo, string displayName, Action<string> emitLog)
+        {
+            var pause = _fatigueModel.OnBeforeClick();
+            if (pause is null) return;
+
+            int ms = (int)pause.Value.TotalMilliseconds;
+            if (ms >= 4000)
+            {
+                emitLog($"Client{clientNo} ({displayName}): mola — {ms}ms.");
+            }
+            else if (ms >= 1000)
+            {
+                emitLog($"Client{clientNo} ({displayName}): kısa düşünme — {ms}ms.");
+            }
+            Thread.Sleep(ms);
         }
 
         private sealed class ProductScanState

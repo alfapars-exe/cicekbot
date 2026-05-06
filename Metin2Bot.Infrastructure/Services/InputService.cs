@@ -9,18 +9,28 @@ namespace Metin2Bot.Infrastructure.Services
     {
         private readonly IMouseInputDriver _mouse;
 
-        // Click timing — random aralıklar, sabit pattern'i kırar (anti-cheat)
-        private const int CursorSettleMinMs = 50;
-        private const int CursorSettleMaxMs = 90;
-        private const int ClickHoldMinMs = 250;
-        private const int ClickHoldMaxMs = 450;
-        private const int PostClickWaitMinMs = 30;
-        private const int PostClickWaitMaxMs = 80;
-        private const int ReleaseSettleMs = 15;
-        private const int TargetOffsetRange = 5; // ±5 px
+        // kbunall referans algoritması — kanıtlanmış çalışan değerler.
+        // Cursor settle (teleport sonrası, click öncesi).
+        private const int CursorSettleMs = 20;
 
-        private static readonly Random _random = new();
+        // Click hold (DOWN ile UP arası) — random aralık.
+        private const int HoldMinMs = 30;
+        private const int HoldMaxMs = 60;
+
+        // Post-click bekleme (lock release öncesi).
+        private const int PostClickMs = 10;
+
+        // Coordinate jitter — küçük, ±2px (±20px değil; geniş jitter UI dışına taşma riski).
+        private const int JitterAbs = 2;
+
+        // Per-thread Random — multi-client'larda thread-affinity karışsa bile race olmaz,
+        // sequence correlation'ı kırar.
+        private static readonly ThreadLocal<Random> _rng = new(() =>
+            new Random(unchecked(Environment.TickCount * 397 ^ Environment.CurrentManagedThreadId)));
+
         private static readonly object _mouseLock = new();
+
+        public Action<string>? DiagnosticsLog { get; set; }
 
         public InputService()
             : this(new NativeMouseInputDriver())
@@ -34,82 +44,78 @@ namespace Metin2Bot.Infrastructure.Services
 
         public IntPtr FindWindow(string windowTitle) => IntPtr.Zero;
 
+        /// <summary>
+        /// PostMessage tabanlı background click. kbunall referansının kanıtlanmış algoritması:
+        /// cursor'u hedefe ışınla → 20ms settle → PostMessage WM_LBUTTONDOWN → 30-60ms hold →
+        /// PostMessage WM_LBUTTONUP → cursor'u eski yerine geri koy.
+        /// </summary>
         public void BackgroundClick(IntPtr handle, int x, int y)
         {
             if (handle == IntPtr.Zero) return;
 
+            var rng = _rng.Value!;
+
+            int targetX = x + rng.Next(-JitterAbs, JitterAbs + 1);
+            int targetY = y + rng.Next(-JitterAbs, JitterAbs + 1);
+
             lock (_mouseLock)
             {
-                // Hedef etrafında ±5px random offset — aynı pikselde click fingerprint'i engelle
-                int targetX = x + _random.Next(-TargetOffsetRange, TargetOffsetRange + 1);
-                int targetY = y + _random.Next(-TargetOffsetRange, TargetOffsetRange + 1);
-
+                Point originalPos = _mouse.GetCursorPosition();
                 int lParam = _mouse.MakeClientLParam(handle, targetX, targetY);
-                ReleaseBeforeClick(handle, lParam);
 
+                if (DiagnosticsLog is not null)
+                {
+                    IntPtr fg = _mouse.GetForegroundWindow();
+                    Diag($"BackgroundClick: target=0x{handle.ToInt64():X} fg=0x{fg.ToInt64():X} screen=({targetX},{targetY}) lParam=0x{lParam:X8}");
+                }
+
+                // Cursor'u hedefe ışınla — oyun bazı durumlarda gerçek cursor'un da hedefte
+                // olmasını ister (hover state). Click sonrası eski yere geri konuyor.
                 _mouse.SetCursorPosition(targetX, targetY);
-                Thread.Sleep(_random.Next(CursorSettleMinMs, CursorSettleMaxMs + 1));
+                Thread.Sleep(CursorSettleMs);
 
-                try
-                {
-                    _mouse.SendLeftButtonDown();
-                    _mouse.PostLeftButtonDown(handle, lParam);
+                _mouse.PostLeftButtonDown(handle, lParam);
+                Thread.Sleep(rng.Next(HoldMinMs, HoldMaxMs + 1));
+                _mouse.PostLeftButtonUp(handle, lParam);
 
-                    // Hold süresi her tıklamada random — anti-cheat pattern detection'ı kırar.
-                    // 250-450ms insan tıklama varyansını taklit eder.
-                    Thread.Sleep(_random.Next(ClickHoldMinMs, ClickHoldMaxMs + 1));
-                }
-                finally
-                {
-                    ReleaseAfterClick(handle, lParam);
-                    Thread.Sleep(_random.Next(PostClickWaitMinMs, PostClickWaitMaxMs + 1));
-                }
+                _mouse.SetCursorPosition(originalPos.X, originalPos.Y);
+                Thread.Sleep(PostClickMs);
             }
         }
 
         public void ForegroundClick(int screenX, int screenY)
         {
+            var rng = _rng.Value!;
             lock (_mouseLock)
             {
-                Point originalPosition = _mouse.GetCursorPosition();
-                ReleaseBeforeClick(IntPtr.Zero, 0);
-
+                Point originalPos = _mouse.GetCursorPosition();
                 _mouse.SetCursorPosition(screenX, screenY);
-                Thread.Sleep(_random.Next(CursorSettleMinMs, CursorSettleMaxMs + 1));
+                Thread.Sleep(CursorSettleMs);
 
-                try
-                {
-                    _mouse.SendLeftButtonDown();
-                    Thread.Sleep(_random.Next(ClickHoldMinMs, ClickHoldMaxMs + 1));
-                }
-                finally
-                {
-                    ReleaseAfterClick(IntPtr.Zero, 0);
-                    _mouse.SetCursorPosition(originalPosition.X, originalPosition.Y);
-                }
+                _mouse.SendLeftButtonDown();
+                Thread.Sleep(rng.Next(HoldMinMs, HoldMaxMs + 1));
+                _mouse.ForceLeftButtonUp(IntPtr.Zero, 0);
+
+                _mouse.SetCursorPosition(originalPos.X, originalPos.Y);
             }
         }
 
         public void HumanClick(int screenX, int screenY, int clickDurationMs)
         {
+            var rng = _rng.Value!;
+            int hold = Math.Max(50, clickDurationMs + rng.Next(-30, 31));
+
             lock (_mouseLock)
             {
-                Point originalPosition = _mouse.GetCursorPosition();
-                ReleaseBeforeClick(IntPtr.Zero, 0);
-
+                Point originalPos = _mouse.GetCursorPosition();
                 _mouse.SetCursorPosition(screenX, screenY);
-                Thread.Sleep(_random.Next(CursorSettleMinMs, CursorSettleMaxMs + 1));
+                Thread.Sleep(CursorSettleMs);
 
-                try
-                {
-                    _mouse.SendLeftButtonDown();
-                    Thread.Sleep(Math.Max(50, clickDurationMs + _random.Next(-30, 31)));
-                }
-                finally
-                {
-                    ReleaseAfterClick(IntPtr.Zero, 0);
-                    _mouse.SetCursorPosition(originalPosition.X, originalPosition.Y);
-                }
+                _mouse.SendLeftButtonDown();
+                Thread.Sleep(hold);
+                _mouse.ForceLeftButtonUp(IntPtr.Zero, 0);
+
+                _mouse.SetCursorPosition(originalPos.X, originalPos.Y);
             }
         }
 
@@ -124,7 +130,7 @@ namespace Metin2Bot.Infrastructure.Services
                     lParam = _mouse.MakeClientLParam(handle, cursor.X, cursor.Y);
                 }
                 _mouse.ForceLeftButtonUp(handle, lParam);
-                Thread.Sleep(ReleaseSettleMs);
+                Thread.Sleep(PostClickMs);
             }
         }
 
@@ -133,15 +139,9 @@ namespace Metin2Bot.Infrastructure.Services
             // Reserved for future use.
         }
 
-        private void ReleaseBeforeClick(IntPtr handle, int lParam)
+        private void Diag(string message)
         {
-            _mouse.ForceLeftButtonUp(handle, lParam);
-        }
-
-        private void ReleaseAfterClick(IntPtr handle, int lParam)
-        {
-            _mouse.ForceLeftButtonUp(handle, lParam);
-            Thread.Sleep(ReleaseSettleMs);
+            DiagnosticsLog?.Invoke(message);
         }
     }
 }

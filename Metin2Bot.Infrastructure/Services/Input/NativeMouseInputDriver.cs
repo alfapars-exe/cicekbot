@@ -23,6 +23,9 @@ namespace Metin2Bot.Infrastructure.Services.Input
         [DllImport("user32.dll", SetLastError = true)]
         private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
 
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
         [StructLayout(LayoutKind.Sequential)]
         private struct INPUT
         {
@@ -91,6 +94,22 @@ namespace Metin2Bot.Infrastructure.Services.Input
             return ((clientPoint.Y & 0xFFFF) << 16) | (clientPoint.X & 0xFFFF);
         }
 
+        public void PostLeftButtonDown(IntPtr handle, int lParam)
+        {
+            if (handle != IntPtr.Zero)
+            {
+                PostMessage(handle, WM_LBUTTONDOWN, MK_LBUTTON, lParam);
+            }
+        }
+
+        public void PostLeftButtonUp(IntPtr handle, int lParam)
+        {
+            if (handle != IntPtr.Zero)
+            {
+                PostMessage(handle, WM_LBUTTONUP, 0, lParam);
+            }
+        }
+
         public void SendLeftButtonDown()
         {
             if (!SendMouseFlag(MOUSEEVENTF_LEFTDOWN))
@@ -110,9 +129,14 @@ namespace Metin2Bot.Infrastructure.Services.Input
             }
         }
 
-        public void PostLeftButtonDown(IntPtr handle, int lParam)
+        public bool IsForegroundWindow(IntPtr handle)
         {
-            PostMessage(handle, WM_LBUTTONDOWN, MK_LBUTTON, lParam);
+            return handle != IntPtr.Zero && GetForegroundWindow() == handle;
+        }
+
+        IntPtr IMouseInputDriver.GetForegroundWindow()
+        {
+            return GetForegroundWindow();
         }
 
         private static bool SendMouseFlag(uint flag)

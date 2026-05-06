@@ -6,9 +6,11 @@ namespace Metin2Bot.Infrastructure.Services
 {
     public class BotEngine : IBotEngine
     {
+        private readonly IInputService _inputService;
         private readonly ClientHandleResolver _handleResolver;
         private readonly ForegroundWindowCoordinator _foregroundCoordinator;
         private readonly ProductClickProcessor _productClickProcessor;
+        private readonly SessionFatigueModel _fatigueModel;
 
         private CancellationTokenSource? _cts;
         private Task? _loopTask;
@@ -22,9 +24,11 @@ namespace Metin2Bot.Infrastructure.Services
             IVisionService visionService,
             IInputService inputService)
         {
+            _inputService = inputService;
+            _fatigueModel = new SessionFatigueModel();
             _handleResolver = new ClientHandleResolver(windowService);
             _foregroundCoordinator = new ForegroundWindowCoordinator(windowService);
-            _productClickProcessor = new ProductClickProcessor(windowService, visionService, inputService);
+            _productClickProcessor = new ProductClickProcessor(windowService, visionService, inputService, _fatigueModel);
         }
 
         public void Start(BotConfiguration config)
@@ -40,15 +44,18 @@ namespace Metin2Bot.Infrastructure.Services
             var clientsSnapshot = CreateClientSnapshot(config.Clients);
             int delayMs = Math.Max(50, config.Settings.ClientSwitchDelayMs);
             double threshold = Math.Clamp(config.Settings.MatchThreshold, 0.1, 0.99);
+            bool bringToFront = config.Settings.BringClientToFront;
 
             _productClickProcessor.Reset();
+            _inputService.DiagnosticsLog = EmitLog;
 
             _cts = new CancellationTokenSource();
             IsRunning = true;
             RunningStateChanged?.Invoke(this, true);
-            EmitLog($"Bot başladı. {clientsSnapshot.Count} client • geçiş {delayMs}ms • eşik {threshold:F2} • tıklama modu: aktif pencere");
+            string mode = bringToFront ? "aktif pencere (öne getir)" : "saf arka plan";
+            EmitLog($"Bot başladı. {clientsSnapshot.Count} client • geçiş {delayMs}ms • eşik {threshold:F2} • tıklama modu: {mode}");
 
-            _loopTask = Task.Run(() => LoopAsync(clientsSnapshot, delayMs, threshold, _cts.Token), _cts.Token);
+            _loopTask = Task.Run(() => LoopAsync(clientsSnapshot, delayMs, threshold, bringToFront, _cts.Token), _cts.Token);
         }
 
         public void Stop()
@@ -62,6 +69,7 @@ namespace Metin2Bot.Infrastructure.Services
             List<ClientConfig> clients,
             int delayMs,
             double threshold,
+            bool bringToFront,
             CancellationToken token)
         {
             try
@@ -82,16 +90,12 @@ namespace Metin2Bot.Infrastructure.Services
                             continue;
                         }
 
-                        if (!await _foregroundCoordinator.EnsureReadyAsync(clientNo, client.DisplayName, handle, EmitLog, token))
+                        if (!await _foregroundCoordinator.EnsureReadyAsync(clientNo, client.DisplayName, handle, bringToFront, EmitLog, token))
                         {
                             continue;
                         }
 
                         _productClickProcessor.Process(clientNo, client, handle, threshold, EmitLog);
-
-                        // NOT: Click sonrası release zaten InputService.BackgroundClick içinde
-                        // (ReleaseAfterClick: 3-kanal LEFTUP + 15ms settle) yapılıyor. Burada
-                        // ekstra ReleaseMouseButtons çağrısı eklemek tıklama detection'ını boğuyordu.
 
                         try { await Task.Delay(delayMs, token); }
                         catch (OperationCanceledException) { break; }
@@ -105,6 +109,7 @@ namespace Metin2Bot.Infrastructure.Services
             finally
             {
                 IsRunning = false;
+                _inputService.DiagnosticsLog = null;
                 _cts?.Dispose();
                 _cts = null;
                 RunningStateChanged?.Invoke(this, false);

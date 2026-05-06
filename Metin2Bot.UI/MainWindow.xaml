@@ -134,11 +134,10 @@
                 </StackPanel>
                 <StackPanel Grid.Column="2" Margin="6,0,0,0" VerticalAlignment="Bottom">
                     <TextBlock Text="Tıklama Modu" Foreground="#9AA0B4" FontSize="11" Margin="0,0,0,4"/>
-                    <TextBlock Text="Aktif pencere" Foreground="#E0E0E0" FontSize="12"/>
-                    <!--
-                        <TextBlock Text="🪟 Her turda pencereyi öne getir" FontSize="12"/>
+                    <CheckBox IsChecked="{Binding BringClientToFront}" Foreground="#E0E0E0" FontSize="12"
+                              ToolTip="Multi-client'ta focus alternation bazı client'larda click drop edebilir; kapatınca kbunall referansı gibi saf background tıklar.">
+                        <TextBlock Text="🪟 Her turda pencereyi öne getir"/>
                     </CheckBox>
-                    -->
                     <TextBlock Text="DEL: bot başlat/durdur (global)" Foreground="#7F8294" FontSize="10" Margin="0,4,0,0"/>
                 </StackPanel>
             </Grid>
