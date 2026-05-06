@@ -9,10 +9,17 @@ namespace Metin2Bot.Infrastructure.Services
     {
         private readonly IMouseInputDriver _mouse;
 
-        private const int CursorSettleMs = 20;
-        private const int DefaultClickHoldMs = 60;
+        // Click timing — random aralıklar, sabit pattern'i kırar (anti-cheat)
+        private const int CursorSettleMinMs = 50;
+        private const int CursorSettleMaxMs = 90;
+        private const int ClickHoldMinMs = 250;
+        private const int ClickHoldMaxMs = 450;
+        private const int PostClickWaitMinMs = 30;
+        private const int PostClickWaitMaxMs = 80;
         private const int ReleaseSettleMs = 15;
+        private const int TargetOffsetRange = 5; // ±5 px
 
+        private static readonly Random _random = new();
         private static readonly object _mouseLock = new();
 
         public InputService()
@@ -33,21 +40,29 @@ namespace Metin2Bot.Infrastructure.Services
 
             lock (_mouseLock)
             {
-                int lParam = _mouse.MakeClientLParam(handle, x, y);
+                // Hedef etrafında ±5px random offset — aynı pikselde click fingerprint'i engelle
+                int targetX = x + _random.Next(-TargetOffsetRange, TargetOffsetRange + 1);
+                int targetY = y + _random.Next(-TargetOffsetRange, TargetOffsetRange + 1);
+
+                int lParam = _mouse.MakeClientLParam(handle, targetX, targetY);
                 ReleaseBeforeClick(handle, lParam);
 
-                _mouse.SetCursorPosition(x, y);
-                Thread.Sleep(CursorSettleMs);
+                _mouse.SetCursorPosition(targetX, targetY);
+                Thread.Sleep(_random.Next(CursorSettleMinMs, CursorSettleMaxMs + 1));
 
                 try
                 {
                     _mouse.SendLeftButtonDown();
                     _mouse.PostLeftButtonDown(handle, lParam);
-                    Thread.Sleep(DefaultClickHoldMs);
+
+                    // Hold süresi her tıklamada random — anti-cheat pattern detection'ı kırar.
+                    // 250-450ms insan tıklama varyansını taklit eder.
+                    Thread.Sleep(_random.Next(ClickHoldMinMs, ClickHoldMaxMs + 1));
                 }
                 finally
                 {
                     ReleaseAfterClick(handle, lParam);
+                    Thread.Sleep(_random.Next(PostClickWaitMinMs, PostClickWaitMaxMs + 1));
                 }
             }
         }
@@ -60,12 +75,12 @@ namespace Metin2Bot.Infrastructure.Services
                 ReleaseBeforeClick(IntPtr.Zero, 0);
 
                 _mouse.SetCursorPosition(screenX, screenY);
-                Thread.Sleep(CursorSettleMs);
+                Thread.Sleep(_random.Next(CursorSettleMinMs, CursorSettleMaxMs + 1));
 
                 try
                 {
                     _mouse.SendLeftButtonDown();
-                    Thread.Sleep(DefaultClickHoldMs);
+                    Thread.Sleep(_random.Next(ClickHoldMinMs, ClickHoldMaxMs + 1));
                 }
                 finally
                 {
@@ -83,12 +98,12 @@ namespace Metin2Bot.Infrastructure.Services
                 ReleaseBeforeClick(IntPtr.Zero, 0);
 
                 _mouse.SetCursorPosition(screenX, screenY);
-                Thread.Sleep(CursorSettleMs);
+                Thread.Sleep(_random.Next(CursorSettleMinMs, CursorSettleMaxMs + 1));
 
                 try
                 {
                     _mouse.SendLeftButtonDown();
-                    Thread.Sleep(Math.Max(50, clickDurationMs));
+                    Thread.Sleep(Math.Max(50, clickDurationMs + _random.Next(-30, 31)));
                 }
                 finally
                 {
